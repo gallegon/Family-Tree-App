@@ -1,32 +1,22 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
-from flask_mysqldb import MySQL
+from flask import Flask, render_template, request, redirect, url_for
 import networkx as nx
 from networkx.drawing.nx_agraph import write_dot, graphviz_layout
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.figure import Figure
-import pydot
-import io
+
 import base64
 from collections import defaultdict
-import plotly
-from plotly.offline import download_plotlyjs, init_notebook_mode, iplot
-import plotly.graph_objs as go
-from pyvis.network import Network
-import pandas as pd
+import sqlite3
+
+from os.path import exists
 
 app = Flask(__name__)
 
-app.config['MYSQL_HOST'] = ''
-app.config['MYSQL_USER'] = ''
-app.config['MYSQL_PASSWORD'] = ''
-app.config['MYSQL_DB'] = 'family_tree_app'
-
 matplotlib.use('Agg')  # workaround for GUI bug
 
-mysql = MySQL(app)
-
+DB_PATH = "./db/family_tree.db"
 
 family_tree = nx.DiGraph()  # Initialize the graph object (Direct Graph)
 
@@ -101,65 +91,74 @@ def convert_to_ppf(graph):
     plt.savefig('./static/ppf.png')
     #draw_pyvis_graph(ppf_graph, "ppf.html")
 
-
-def draw_pyvis_graph(G, save_path):
-    nt = Network(height="750px", width="100%", bgcolor="#222222", font_color="white", layout="true")
-    nt.from_DOT("test.dot")
-    #nt.show_buttons(filter_=True)
-    nt.show(save_path)
-
-
 #routes
 @app.route('/')
 def Index():
+    db_exists = exists(DB_PATH)
+
+    # Open the database if one exists, otherwise create a database
+    conn = sqlite3.connect(DB_PATH)
+
+    # Create People and Parents_Children tables if this is a new database.
+    if not db_exists:
+        conn.execute("""CREATE TABLE People (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            name varchar(255) DEFAULT NULL,
+            bio mediumtext DEFAULT NULL);""")
+
+        conn.execute("""CREATE TABLE Parents_Children (
+            parent_id int(11) DEFAULT NULL,
+            child_id int(11) DEFAULT NULL);""")
+    
+        conn.execute("INSERT INTO People (name, bio) VALUES ('Noel', 'Not christmas noel')")
+    
+        conn.commit()
     """
     The following code snippet initializes the NetworkX graph.  First nodes are created based on
     who is in the People table (specifically their unique IDs), then edges are assigned between
     nodes based on data in the Parents_Children table.
     """
 
+
     # Temporary tree that is reinstantiated every time the index is got.  
     # This is eventually copied to the global family_tree
     tree = nx.DiGraph()
 
-    # Get IDs to use as nodes
-    cursor = mysql.connection.cursor()
-    cursor.execute('SELECT id, name FROM People')
-    data = cursor.fetchall()
+    # Get IDs and names to use as nodes
+    conn = sqlite3.connect(DB_PATH)
+    node_list = conn.execute("SELECT id, name FROM People")
 
     # create nodes
-    for id, person_name in data:
+    for id, person_name in node_list:
+        print(f"{id} {person_name}")
         if tree.has_node(id):
             continue
         else:
             tree.add_node(id, name=person_name)
     
-    print(tree.number_of_nodes())
-    cursor.close()
+    #print(tree.number_of_nodes())
+    #cursor.close()
 
-    # create edges
-    cursor = mysql.connection.cursor()
-    cursor.execute('SELECT * FROM Parents_Children')
-    edges = cursor.fetchall()
-    
+    # create edges from edge list in database (Parents_Children table)
+    edge_list = conn.execute("SELECT * FROM Parents_Children")
+
     parents_by_id = defaultdict(list)
     children_by_id = defaultdict(list)
 
     edge_list_details = []
-    for parent_id, child_id in edges:
+    for parent_id, child_id in edge_list:
         if tree.has_edge(parent_id, child_id):
             continue
         else:
             tree.add_edge(parent_id, child_id)
         
         # get the name of the parent by querying the ID in people
-        cursor = mysql.connection.cursor()
-        cursor.execute(f'SELECT name FROM People WHERE id={parent_id}')
+        cursor = conn.execute(f'SELECT name FROM People WHERE id={parent_id}')
         name = cursor.fetchall()
         parent_name = name[0][0]
 
         # get the name of the child by querying the ID in people
-        cursor.execute(f'SELECT name FROM People WHERE id={child_id}')
+        cursor = conn.execute(f'SELECT name FROM People WHERE id={child_id}')
         name = cursor.fetchall()
         child_name = name[0][0]
 
@@ -172,13 +171,9 @@ def Index():
         edge_list_details.append(edge_info)
 
 
-    print(tree.number_of_edges())
-    cursor.close()
+    #print(tree.number_of_edges())
 
-    cursor = mysql.connection.cursor()
-    cursor.execute('SELECT * FROM People')
-    data = cursor.fetchall()
-    cursor.close()
+    data = conn.execute("SELECT * FROM People")
 
     family_tree = tree
 
@@ -200,9 +195,7 @@ def Index():
     with open('./static/ppf.png', 'rb') as tree_image:
         img_b64 = "data:image/png;base64,"
         img_b64 += base64.b64encode(tree_image.read()).decode('utf8')
-
-    #draw_pyvis_graph(family_tree, "family_tree.html")
-
+    
     return render_template('index.html', title='Untitled app', people = data, 
                             family_tree_img = "./../static/foo.png", image=img_b64, 
                             edges=edge_list_details, parents=parents_by_id, children=children_by_id)
@@ -213,9 +206,11 @@ def add_person():
     if request.method == 'POST':
         name = request.form['name']
         bio = request.form['bio']
-        cursor = mysql.connection.cursor()
-        cursor.execute(f"INSERT INTO People (name, bio) VALUES ('{name}', '{bio}')")
-        mysql.connection.commit()
+        conn = sqlite3.connect(DB_PATH)
+
+        # Todo fix sql injection possibility here
+        conn.execute(f"INSERT INTO People (name, bio) VALUES ('{name}', '{bio}')")
+        conn.commit()
         return redirect(url_for('Index'))
 
 
@@ -223,46 +218,45 @@ def add_person():
 @app.route('/add_child/<id>', methods=['GET'])
 def add_child(id):
     #if request.method == 'POST':
-    cursor = mysql.connection.cursor()
-    cursor.execute(f'SELECT name FROM People WHERE id={id}')
-    data = cursor.fetchall()
-    person_name = data[0]
-    cursor.execute(f'SELECT * FROM People WHERE id!={id}')
-    data = cursor.fetchall()
-    cursor.close()
+    conn = sqlite3.connect(DB_PATH)
+
+    data = conn.execute(f'SELECT name FROM People WHERE id={id}').fetchone()
+    person_name = data
+    data = conn.execute(f'SELECT * FROM People WHERE id!={id}')
+
     return render_template('add_child.html', title='Add a child', person = person_name, parent_id = id, people=data)
 
 # This route gives users the option to choose a parent to add to a selected node.
 @app.route('/add_parent/<id>', methods=['GET'])
 def add_parent(id):
-    #if request.method == 'POST':
-    cursor = mysql.connection.cursor()
-    cursor.execute(f'SELECT name FROM People WHERE id={id}')
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.execute(f'SELECT name FROM People WHERE id={id}')
     data = cursor.fetchall()
     person_name = data[0]
-    cursor.execute(f'SELECT * FROM People WHERE id!={id}')
+
+    cursor = conn.execute(f'SELECT * FROM People WHERE id!={id}')
     data = cursor.fetchall()
-    cursor.close()
+    
     return render_template('add_parent.html', title='Add a parent', person = person_name, child_id = id, people=data)
 
 # Add a parent/child edge to the SQL database
 @app.route('/add_edge/<parent_id>/<child_id>', methods=['GET', 'POST'])
 def add_edge(parent_id, child_id):
     print(f'edge ({parent_id}, {child_id})')
-    cursor = mysql.connection.cursor()
-    cursor.execute(f"INSERT INTO Parents_Children (parent_id, child_id) VALUES ({parent_id}, {child_id})")
-    mysql.connection.commit()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(f"INSERT INTO Parents_Children (parent_id, child_id) VALUES ({parent_id}, {child_id})")
+    conn.commit()
     return redirect(url_for('Index'))
 
 @app.route('/edit_person/<id>', methods=['GET', 'POST'])
 def edit_person(id):
-    cursor = mysql.connection.cursor()
-    cursor.execute(f'SELECT * FROM People WHERE id={id}')
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.execute(f'SELECT * FROM People WHERE id={id}')
     data = cursor.fetchall()
     data = data[0]
 
     id, name, bio = data
-    cursor.close()
+    
     return render_template('edit_person.html', title='Edit a person', name=name, bio=bio, id=id)
 
 @app.route('/update_person/<id>', methods=['GET', 'POST'])
@@ -270,39 +264,38 @@ def update_person(id):
     if request.method == 'POST':
         name = request.form['name']
         bio = request.form['bio']
-        cursor = mysql.connection.cursor()
-        cursor.execute(f"UPDATE People SET name='{name}', bio='{bio}' WHERE id={id}")
-        mysql.connection.commit()
+        conn = sqlite3.connect(DB_PATH)
+
+        cursor = conn.execute(f"UPDATE People SET name='{name}', bio='{bio}' WHERE id={id}")
+        conn.commit()
         return redirect(url_for('Index'))
 
 @app.route('/delete_person/<id>', methods=['GET', 'POST'])
 def delete_person(id):
     # Delete the person and associated parent/child relationships
     try:
-        cursor = mysql.connection.cursor()
-
-        cursor.execute(f"DELETE FROM Parents_Children WHERE parent_id={id} OR child_id={id}")
-        cursor.execute(f"DELETE FROM People WHERE id={id}")
-        mysql.connection.commit()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.execute(f"DELETE FROM Parents_Children WHERE parent_id={id} OR child_id={id}")
+        cursor = conn.execute(f"DELETE FROM People WHERE id={id}")
+        conn.commit()
         return redirect('/')
     except Exception as e:
         print(e)
     finally:
-        cursor.close()
+        print(f"Requested node: {id} for deletion.")
 
 @app.route('/delete_edge/<p_id>/<c_id>', methods=['GET', 'POST'])
 def delete_edge(p_id, c_id):
     # Delete the edge with the matching parent and child IDs
     try:
-        cursor = mysql.connection.cursor()
-
-        cursor.execute(f'DELETE FROM Parents_Children WHERE parent_id={p_id} AND child_id={c_id}')
-        mysql.connection.commit()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.execute(f'DELETE FROM Parents_Children WHERE parent_id={p_id} AND child_id={c_id}')
+        conn.commit()
         return redirect('/')
     except Exception as e:
         print(e)
     finally:
-        cursor.close()
+        print(f"Requested edge: ({p_id}, {c_id}) for deletion.")
 
 if __name__ == "__main__":
     app.run(port=57608, debug=True)
