@@ -10,6 +10,8 @@ import base64
 from collections import defaultdict
 import sqlite3
 
+import sys
+
 from os.path import exists
 
 app = Flask(__name__)
@@ -24,7 +26,7 @@ family_tree = nx.DiGraph()  # Initialize the graph object (Direct Graph)
 # general functions
 
 # Converts the directed graph to "parent-pair form".  Children are no longer
-# direct descendants of parents.  There is an intermediate node called a 
+# direct descendants of parents.  There is an intermediate node called a
 # "parent-pair" which acts as a direct ancestor to a child and a direct child to a parent.
 def convert_to_ppf(graph):
     ppf_graph = nx.DiGraph()
@@ -33,7 +35,7 @@ def convert_to_ppf(graph):
     for node in graph.nodes:
         person_name = graph.nodes[node]['name']
         ppf_graph.add_node(node, name=person_name)
-        
+
 
     parent_pairs = set()
 
@@ -48,7 +50,7 @@ def convert_to_ppf(graph):
     for parent, child in graph.edges:
         ch_par_map[child].append(parent)
         par_child_map[parent].append(child)
-    
+
     for child, parents in ch_par_map.items():
         num_parents = len(parents)
         if num_parents == 0:
@@ -109,9 +111,9 @@ def Index():
         conn.execute("""CREATE TABLE Parents_Children (
             parent_id int(11) DEFAULT NULL,
             child_id int(11) DEFAULT NULL);""")
-    
+
         conn.execute("INSERT INTO People (name, bio) VALUES ('Noel', 'Not christmas noel')")
-    
+
         conn.commit()
     """
     The following code snippet initializes the NetworkX graph.  First nodes are created based on
@@ -120,7 +122,7 @@ def Index():
     """
 
 
-    # Temporary tree that is reinstantiated every time the index is got.  
+    # Temporary tree that is reinstantiated every time the index is got.
     # This is eventually copied to the global family_tree
     tree = nx.DiGraph()
 
@@ -135,7 +137,7 @@ def Index():
             continue
         else:
             tree.add_node(id, name=person_name)
-    
+
     #print(tree.number_of_nodes())
     #cursor.close()
 
@@ -151,7 +153,7 @@ def Index():
             continue
         else:
             tree.add_edge(parent_id, child_id)
-        
+
         # get the name of the parent by querying the ID in people
         cursor = conn.execute(f'SELECT name FROM People WHERE id={parent_id}')
         name = cursor.fetchall()
@@ -195,9 +197,9 @@ def Index():
     with open('./static/ppf.png', 'rb') as tree_image:
         img_b64 = "data:image/png;base64,"
         img_b64 += base64.b64encode(tree_image.read()).decode('utf8')
-    
-    return render_template('index.html', title='Untitled app', people = data, 
-                            family_tree_img = "./../static/foo.png", image=img_b64, 
+
+    return render_template('index.html', title='Untitled app', people = data,
+                            family_tree_img = "./../static/foo.png", image=img_b64,
                             edges=edge_list_details, parents=parents_by_id, children=children_by_id)
 
 # add a person to the SQL database via a simple web form (for now)
@@ -236,7 +238,7 @@ def add_parent(id):
 
     cursor = conn.execute(f'SELECT * FROM People WHERE id!={id}')
     data = cursor.fetchall()
-    
+
     return render_template('add_parent.html', title='Add a parent', person = person_name, child_id = id, people=data)
 
 # Add a parent/child edge to the SQL database
@@ -256,7 +258,7 @@ def edit_person(id):
     data = data[0]
 
     id, name, bio = data
-    
+
     return render_template('edit_person.html', title='Edit a person', name=name, bio=bio, id=id)
 
 @app.route('/update_person/<id>', methods=['GET', 'POST'])
@@ -298,4 +300,7 @@ def delete_edge(p_id, c_id):
         print(f"Requested edge: ({p_id}, {c_id}) for deletion.")
 
 if __name__ == "__main__":
-    app.run(port=57608, debug=True)
+    # Host is first command line argument, port is second
+    HOST = sys.argv[1]
+    PORT = int(sys.argv[2])
+    app.run(host=HOST, port=PORT)
